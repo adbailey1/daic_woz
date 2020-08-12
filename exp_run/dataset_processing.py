@@ -1,6 +1,6 @@
 import os
 import sys
-import utilities as util
+from utils import utilities as util
 import pickle
 import logging
 import logging.handlers
@@ -8,7 +8,8 @@ import random
 import math
 import numpy as np
 import h5py
-import config_dataset
+from configs import config_dataset
+from configs import config
 
 
 def create_data_arrays(ground_truth_data, shuffled_index):
@@ -221,7 +222,8 @@ def find_files_in_database(complete_database, sub_section):
 
 
 def partition_dataset(workspace, features_exp, features_directory, sub_dir,
-                      current_directory, mode, dataset_path, config, folds=4):
+                      current_directory, mode, dataset_path, folds=4,
+                      gender='-'):
     """
     The top function that logs information regarding the experiment
     parameters, loads the database of features along with the labels in order
@@ -239,8 +241,14 @@ def partition_dataset(workspace, features_exp, features_directory, sub_dir,
         config: obj - The configuration file to be used for this experiment
         folds: int - The number of folds to split the dataset into
     """
-    log_path = os.path.join(workspace, 'data_folds_'+str(folds),
-                            'data_logger.log')
+    if gender == 'm' or gender == 'f':
+        log_path = os.path.join(workspace, 'data_folds_'+str(folds)+'_'+gender,
+                                'data_logger.log')
+    else:
+        log_path = os.path.join(workspace,
+                                'data_folds_' + str(folds),
+                                'data_logger.log')
+
     data_logger = logging.getLogger('DataLogger')
     data_logger.setLevel(logging.INFO)
     data_handler = logging.handlers.RotatingFileHandler(log_path)

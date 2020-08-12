@@ -1,0 +1,22 @@
+name: base
+channels:
+  - defaults
+dependencies:
+  - conda
+  - python=3.7
+  - numpy
+  - cudatoolkit=10.1
+  - torchvision
+  - pytorch
+  - h5py
+  - matplotlib
+  - librosa
+  - psutil
+  - cython
+  - pandas
+  - scipy
+  - python-sounddevice
+  - opencv
+  - cmake
+prefix: /home/andrew/miniconda3
+

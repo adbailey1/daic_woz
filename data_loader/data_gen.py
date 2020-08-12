@@ -1,12 +1,12 @@
 import numpy as np
 import random
-import utilities as util
+import utils.utilities as util
 
 
 class GenerateData:
     def __init__(self, train_labels, dev_labels, train_feat, dev_feat,
-                 train_loc, dev_loc, train_indexes, dev_indexes, logger, config,
-                 checkpoint):
+                 train_loc, dev_loc, train_indices, dev_indices, logger, config,
+                 checkpoint, gender_balance=False, data_saver=None):
         """
         Class which acts as a dataloader. Takes in training or validation
         data an outputs a generator of size equal to the specified batch.
@@ -28,10 +28,21 @@ class GenerateData:
             checkpoint: Bool - If true, load initial conditions from last
                         checkpoint
         """
-        self.zeros_index_train = train_indexes[0]
-        self.ones_index_train = train_indexes[1]
-        self.zeros_index_dev = dev_indexes[0]
-        self.ones_index_dev = dev_indexes[1]
+        self.gender_balance = gender_balance
+        if self.gender_balance:
+            self.zeros_index_train_f = train_indices[0]
+            self.ones_index_train_f = train_indices[1]
+            self.zeros_index_train_m = train_indices[2]
+            self.ones_index_train_m = train_indices[3]
+            self.zeros_index_dev_f = dev_indices[0]
+            self.ones_index_dev_f = dev_indices[1]
+            self.zeros_index_dev_m = dev_indices[2]
+            self.ones_index_dev_m = dev_indices[3]
+        else:
+            self.zeros_index_train = train_indices[0]
+            self.ones_index_train = train_indices[1]
+            self.zeros_index_dev = dev_indices[0]
+            self.ones_index_dev = dev_indices[1]
         self.config = config
         self.audio_mode_is_concat_not_shorten = self.config.EXPERIMENT_DETAILS[
             'AUDIO_MODE_IS_CONCAT_NOT_SHORTEN']
@@ -51,6 +62,7 @@ class GenerateData:
         self.dev_loc = dev_loc
         self.logger = logger
         self.checkpoint = checkpoint
+        self.data_saver = data_saver
 
         if self.learning_procedure_train == 'whole_file':
             stats = 0
@@ -59,7 +71,11 @@ class GenerateData:
         else:
             stats = self.train_feat
 
-        self.mean, self.standard_deviation = self.calculate_stats(stats)
+        if len(data_saver) > 0:
+            self.mean = data_saver['mean']
+            self.standard_deviation = data_saver['std']
+        else:
+            self.mean, self.standard_deviation = self.calculate_stats(stats)
 
     def calculate_stats(self, x):
         """
@@ -91,7 +107,7 @@ class GenerateData:
 
         return mean, standard_deviation
 
-    def resolve_batch_difference(self, batch_indexes, half_batch, indexes):
+    def resolve_batch_difference(self, batch_indices, half_batch, indices):
         """
         For imbalanced datasets, one class will be traversed more quickly
         than another and therefore will need to be reshuffled and potentially
@@ -110,16 +126,16 @@ class GenerateData:
             pointer: Used to determine the position to begin sampling the
                      next batch of indexes
         """
-        if batch_indexes.shape[0] != half_batch:
-            current_length = batch_indexes.shape[0]
+        if batch_indices.shape[0] != half_batch:
+            current_length = batch_indices.shape[0]
             difference = half_batch - current_length
             pointer = 0
-            random.shuffle(indexes)
-            temp = indexes[pointer:pointer + difference]
+            random.shuffle(indices)
+            temp = indices[pointer:pointer + difference]
             pointer += difference
-            batch_indexes = np.concatenate((batch_indexes,
+            batch_indexes = np.concatenate((batch_indices,
                                             temp), axis=0)
-            return batch_indexes, indexes, pointer
+            return batch_indexes, indices, pointer
 
     def max_loc_diff(self, locators):
         """
@@ -156,7 +172,7 @@ class GenerateData:
         else:
             return False
 
-    def generate_train_data(self, epoch, data_saver):
+    def generate_train_data(self, epoch):
         """
         Generates the training batches to be used as inputs to a neural
         network. There are different ways of processing depending on whether
@@ -188,77 +204,204 @@ class GenerateData:
         feature_dim = self.config.EXPERIMENT_DETAILS['FEATURE_DIMENSIONS']
 
         if self.checkpoint:
-            pointer_zero = data_saver['pointer_zero']
-            pointer_one = data_saver['pointer_one']
-            train_indexes_zeros = data_saver['index_zeros']
-            train_indexes_ones = data_saver['index_ones']
-        else:
-            pointer_zero = pointer_one = 0
-            train_indexes_zeros = np.array(self.zeros_index_train)
-            train_indexes_ones = np.array(self.ones_index_train)
-            random.shuffle(train_indexes_zeros)
-            random.shuffle(train_indexes_ones)
+            if self.gender_balance:
+                pointer_zero_f = self.data_saver['pointer_zero_f']
+                pointer_one_f = self.data_saver['pointer_one_f']
+                pointer_zero_m = self.data_saver['pointer_zero_m']
+                pointer_one_m = self.data_saver['pointer_one_m']
+                train_indices_zeros_f = self.data_saver['index_zeros_f']
+                train_indices_ones_f = self.data_saver['index_ones_f']
+                train_indices_zeros_m = self.data_saver['index_zeros_m']
+                train_indices_ones_m = self.data_saver['index_ones_m']
+                total_num_dep = self.data_saver['total_num_dep']
+            else:
+                pointer_zero = self.data_saver['pointer_zero']
+                pointer_one = self.data_saver['pointer_one']
+                train_indices_zeros = self.data_saver['index_zeros']
+                train_indices_ones = self.data_saver['index_ones']
+            temp_batch = self.data_saver['temp_batch']
 
-        half_batch = self.batch_size // 2
+        else:
+            if self.gender_balance:
+                pointer_zero_f = pointer_one_f = pointer_zero_m = pointer_one_m = 0
+                train_indices_zeros_f = np.array(self.zeros_index_train_f)
+                train_indices_ones_f = np.array(self.ones_index_train_f)
+                train_indices_zeros_m = np.array(self.zeros_index_train_m)
+                train_indices_ones_m = np.array(self.ones_index_train_m)
+                random.shuffle(train_indices_zeros_f)
+                random.shuffle(train_indices_ones_f)
+                random.shuffle(train_indices_zeros_m)
+                random.shuffle(train_indices_ones_m)
+                shortest = np.argmin([len(self.ones_index_train_f),
+                                      len(self.ones_index_train_m)])
+                total_num_dep = len(self.ones_index_train_f) + len(
+                    self.ones_index_train_m)
+                temp_batch = self.batch_size // 4
+            else:
+                pointer_zero = pointer_one = 0
+                train_indices_zeros = np.array(self.zeros_index_train)
+                train_indices_ones = np.array(self.ones_index_train)
+                random.shuffle(train_indices_zeros)
+                random.shuffle(train_indices_ones)
+                temp_batch = self.batch_size // 2
+
+        counter = 0
+
         while True:
             reset = False
-            # TODO For Debugging - Change Back
             proceed_make_equal = self.criteria()
             if proceed_make_equal:
-                if pointer_one+half_batch >= files_in_dataset//2:
+                if pointer_one+temp_batch >= files_in_dataset//2:
                     epoch += 1
                     reset = True
 
-                batch_indexes_zeros = train_indexes_zeros[
-                                      pointer_zero:pointer_zero+half_batch]
-                batch_indexes_ones = train_indexes_ones[
-                                     pointer_one:pointer_one+half_batch]
-
-                pointer_zero += half_batch
-                pointer_one += half_batch
+                batch_indices_zeros = train_indices_zeros[
+                                      pointer_zero:pointer_zero+temp_batch]
+                batch_indices_ones = train_indices_ones[
+                                     pointer_one:pointer_one+temp_batch]
+                pointer_zero += temp_batch
+                pointer_one += temp_batch
             else:
-                batch_indexes_zeros = train_indexes_zeros[
-                                      pointer_zero:pointer_zero+half_batch]
-                batch_indexes_ones = train_indexes_ones[
-                                     pointer_one:pointer_one+half_batch]
+                if self.gender_balance:
+                    batch_indices_zeros_f = train_indices_zeros_f[
+                                            pointer_zero_f:pointer_zero_f + temp_batch]
+                    batch_indices_ones_f = train_indices_ones_f[
+                                           pointer_one_f:pointer_one_f + temp_batch]
+                    batch_indices_zeros_m = train_indices_zeros_m[
+                                            pointer_zero_m:pointer_zero_m + temp_batch]
+                    batch_indices_ones_m = train_indices_ones_m[
+                                           pointer_one_m:pointer_one_m + temp_batch]
 
-                pointer_one += half_batch
+                    pointer_one_f += temp_batch
+                    pointer_one_m += temp_batch
+                    pointer_zero_f += temp_batch
+                    pointer_zero_m += temp_batch
+                    counter += (2 * temp_batch)
 
-                if pointer_zero >= train_indexes_zeros.shape[0]:
-                    if batch_indexes_zeros.shape[0] != half_batch:
-                        batch_indexes_zeros, train_indexes_zeros, \
-                        pointer_zero = self.resolve_batch_difference(batch_indexes_zeros,
-                                                                     half_batch,
-                                                                     train_indexes_zeros)
-                    else:
-                        pointer_zero = 0
+                    if counter >= total_num_dep:
+                        epoch += 1
+                        reset = True
+                        counter = 0
+
+                    if pointer_zero_f >= train_indices_zeros_f.shape[0]:
+                        if batch_indices_zeros_f.shape[0] != temp_batch:
+                            batch_indices_zeros_f, train_indices_zeros_f, \
+                            pointer_zero_f = self.resolve_batch_difference(
+                                batch_indices_zeros_f, temp_batch,
+                                train_indices_zeros_f)
+                        else:
+                            pointer_zero_f = 0
+                    if pointer_one_f >= train_indices_ones_f.shape[0]:
+                        if batch_indices_ones_f.shape[0] != temp_batch:
+                            batch_indices_ones_f, train_indices_ones_f, \
+                            pointer_one_f = self.resolve_batch_difference(
+                                batch_indices_ones_f, temp_batch,
+                                train_indices_ones_f)
+                        else:
+                            pointer_one_f = 0
+                        self.data_saver = {'pointer_one_f': pointer_one_f,
+                                           'pointer_zero_f': pointer_zero_f,
+                                           'pointer_one_m': pointer_one_m,
+                                           'pointer_zero_m': pointer_zero_m,
+                                           'index_ones_f':
+                                               train_indices_ones_f,
+                                           'index_zeros_f':
+                                               train_indices_zeros_f,
+                                           'index_ones_m':
+                                               train_indices_ones_m,
+                                           'index_zeros_m':
+                                               train_indices_zeros_m,
+                                           'temp_batch': temp_batch,
+                                           'total_num_dep': total_num_dep,
+                                           'mean': self.mean,
+                                           'std': self.standard_deviation}
+
+                    if pointer_zero_m >= train_indices_zeros_m.shape[0]:
+                        if batch_indices_zeros_m.shape[0] != temp_batch:
+                            batch_indices_zeros_m, train_indices_zeros_m, \
+                            pointer_zero_m = self.resolve_batch_difference(
+                                batch_indices_zeros_m, temp_batch,
+                                train_indices_zeros_m)
+                        else:
+                            pointer_zero_m = 0
+                    if pointer_one_m >= train_indices_ones_m.shape[0]:
+                        if batch_indices_ones_m.shape[0] != temp_batch:
+                            batch_indices_ones_m, train_indices_ones_m, \
+                            pointer_one_m = self.resolve_batch_difference(
+                                batch_indices_ones_m, temp_batch,
+                                train_indices_ones_m)
+                        else:
+                            pointer_one_m = 0
+                        self.data_saver = {'pointer_one_f': pointer_one_f,
+                                           'pointer_zero_f': pointer_zero_f,
+                                           'pointer_one_m': pointer_one_m,
+                                           'pointer_zero_m': pointer_zero_m,
+                                           'index_ones_f':
+                                               train_indices_ones_f,
+                                           'index_zeros_f':
+                                               train_indices_zeros_f,
+                                           'index_ones_m':
+                                               train_indices_ones_m,
+                                           'index_zeros_m':
+                                               train_indices_zeros_m,
+                                           'total_num_dep': total_num_dep,
+                                           'temp_batch': temp_batch,
+                                           'mean': self.mean,
+                                           'std': self.standard_deviation}
+                    batch_labels = np.concatenate((np.full((
+                        batch_indices_zeros_f.shape[0]), 0), np.full((
+                        batch_indices_ones_f.shape[0]), 1), np.full((
+                        batch_indices_zeros_m.shape[0]), 2), np.full((
+                        batch_indices_ones_m.shape[0]), 3)), axis=0).astype(int)
+
+                    current_indices = np.concatenate((batch_indices_zeros_f,
+                                                      batch_indices_ones_f,
+                                                      batch_indices_zeros_m,
+                                                      batch_indices_ones_m),
+                                                     axis=0)
                 else:
-                    pointer_zero += half_batch
+                    batch_indices_zeros = train_indices_zeros[
+                                          pointer_zero:pointer_zero+temp_batch]
+                    batch_indices_ones = train_indices_ones[
+                                         pointer_one:pointer_one+temp_batch]
+                    pointer_one += temp_batch
+                    pointer_zero += temp_batch
 
-                if pointer_one >= train_indexes_ones.shape[0]:
-                    epoch += 1
-                    reset = True
-                    if batch_indexes_ones.shape[0] != half_batch:
-                        batch_indexes_ones, train_indexes_ones, pointer_one = \
-                            self.resolve_batch_difference(batch_indexes_ones,
-                                                          half_batch,
-                                                          train_indexes_ones)
-                    else:
-                        pointer_one = 0
-                    data_saver = {'pointer_one': pointer_one,
-                                  'pointer_zero': pointer_zero,
-                                  'index_ones': train_indexes_ones,
-                                  'index_zeros': train_indexes_zeros}
+                    if pointer_zero >= train_indices_zeros.shape[0]:
+                        if batch_indices_zeros.shape[0] != temp_batch:
+                            batch_indices_zeros, train_indices_zeros, \
+                            pointer_zero = self.resolve_batch_difference(
+                                batch_indices_zeros, temp_batch,
+                                train_indices_zeros)
+                        else:
+                            pointer_zero = 0
+                    if pointer_one >= train_indices_ones.shape[0]:
+                        epoch += 1
+                        reset = True
+                        if batch_indices_ones.shape[0] != temp_batch:
+                            batch_indices_ones, train_indices_ones, \
+                            pointer_one = self.resolve_batch_difference(
+                                batch_indices_ones, temp_batch,
+                                train_indices_ones)
+                        else:
+                            pointer_one = 0
+                        self.data_saver = {'pointer_one': pointer_one,
+                                           'pointer_zero': pointer_zero,
+                                           'index_ones': train_indices_ones,
+                                           'index_zeros': train_indices_zeros,
+                                           'temp_batch': temp_batch,
+                                           'mean': self.mean,
+                                           'std': self.standard_deviation}
 
-            current_indexes = np.concatenate((batch_indexes_zeros,
-                                              batch_indexes_ones),
-                                             axis=0)
+                    current_indices = np.concatenate((batch_indices_zeros,
+                                                      batch_indices_ones),
+                                                     axis=0)
+                    batch_labels = train_classes[current_indices.tolist()]
 
-            if self.learning_procedure_train == 'chunked_file' or \
-                    self.learning_procedure_train == 'whole_file':
-                locs = [self.train_loc[i] for i in current_indexes.tolist()]
+            if self.learning_procedure_train == 'chunked_file':
+                locs = [self.train_loc[i] for i in current_indices.tolist()]
                 max_value, locs_array = self.max_loc_diff(locs)
-                current_batch_size = current_indexes.shape[0]
+                current_batch_size = current_indices.shape[0]
                 if self.convert_to_image:
                     batch_data = np.zeros((current_batch_size*max_value,
                                            3,
@@ -279,23 +422,26 @@ class GenerateData:
                             batch_data[placeholder, :, :] = j
                         placeholder += current_batch_size
             else:
-                batch_data = self.train_feat[current_indexes]
+                batch_data = self.train_feat[current_indices]
                 locs_array = 0
 
-            batch_labels = train_classes[current_indexes.tolist()]
             batch_data = util.normalise(batch_data, self.mean,
                                         self.standard_deviation)
 
             if reset and self.make_equal:
                 pointer_zero = pointer_one = 0
-                random.shuffle(train_indexes_zeros)
-                random.shuffle(train_indexes_ones)
-                data_saver = {'pointer_one': pointer_one,
-                              'pointer_zero': pointer_zero,
-                              'train_index_ones': train_indexes_ones,
-                              'train_index_zeros': train_indexes_zeros}
+                random.shuffle(train_indices_zeros)
+                random.shuffle(train_indices_ones)
+                self.data_saver = {'pointer_one': pointer_one,
+                                   'pointer_zero': pointer_zero,
+                                   'index_ones': train_indices_ones,
+                                   'index_zeros': train_indices_zeros,
+                                   'temp_batch': temp_batch,
+                                   'mean': self.mean,
+                                   'std': self.standard_deviation}
 
-            yield batch_data, batch_labels, epoch, reset, locs_array, data_saver
+            yield (batch_data, batch_labels, epoch, reset), locs_array, \
+                  self.data_saver
 
     def generate_development_data(self, epoch):
         """
@@ -316,18 +462,109 @@ class GenerateData:
             batch_folders: Current folders associated to the batch data
             locs_array: Array of the length of each file in the batch
         """
+        if self.gender_balance:
+            dev_indices_zeros_f = np.array(self.zeros_index_dev_f)
+            dev_indices_ones_f = np.array(self.ones_index_dev_f)
+            dev_indices_zeros_m = np.array(self.zeros_index_dev_m)
+            dev_indices_ones_m = np.array(self.ones_index_dev_m)
+            indices = np.concatenate((dev_indices_zeros_f, dev_indices_ones_f,
+                                      dev_indices_zeros_m,
+                                      dev_indices_ones_m), axis=0).astype(int)
+        else:
+            dev_indices_zeros = np.array(self.zeros_index_dev)
+            dev_indices_ones = np.array(self.ones_index_dev)
+            indices = np.concatenate((dev_indices_zeros, dev_indices_ones),
+                                     axis=0).astype(int)
+
         folders = np.array(self.dev_labels[0])
         classes = np.array(self.dev_labels[1])
-        dev_indexes_zeros = np.array(self.zeros_index_dev)
-        dev_indexes_ones = np.array(self.ones_index_dev)
-        indexes = np.concatenate((dev_indexes_zeros, dev_indexes_ones), axis=0)
         pointer = 0
-        indexes = indexes.tolist()
+        indices = indices.tolist()
         if self.checkpoint:
             for i in range(epoch):
-                random.shuffle(indexes)
-        else:
-            random.shuffle(indexes)
+                random.shuffle(indices)
+                self.checkpoint = False
+        elif not self.checkpoint:
+            random.shuffle(indices)
+
+        if self.learning_procedure_dev == 'whole_file' or \
+                self.learning_procedure_dev == 'chunked_file':
+            if len(self.dev_loc) % self.batch_size == 0:
+                dev_counter = (len(self.dev_loc) // self.batch_size)
+            else:
+                dev_counter = (len(self.dev_loc) // self.batch_size) + 1
+            for i in range(dev_counter):
+                batch_indices = indices[pointer:pointer+self.batch_size]
+                pointer += self.batch_size
+                locs = [self.dev_loc[inter] for inter in batch_indices]
+                max_value, locs_array = self.max_loc_diff(locs)
+                current_batch_size = locs_array.shape[0]
+                if self.convert_to_image:
+                    if self.feature_experiment == 'MFCC_concat':
+                        batch_data = np.zeros((max_value*current_batch_size,
+                                               self.freq_bins*3,
+                                               self.feature_dim))
+                    else:
+                        batch_data = np.zeros((max_value*current_batch_size,
+                                               3,
+                                               self.freq_bins,
+                                               self.feature_dim))
+                else:
+                    batch_data = np.zeros((max_value*current_batch_size,
+                                           self.freq_bins,
+                                           self.feature_dim))
+                # batch_data = batch_data - 1e-5
+                for p, j in enumerate(locs):
+                    interim_data = self.dev_feat[j[0]:j[1]]
+                    placeholder = p
+                    for k in interim_data:
+                        if self.convert_to_image and not \
+                                self.feature_experiment == 'MFCC_concat':
+                            batch_data[placeholder, :, :, :] = k
+                        else:
+                            batch_data[placeholder, :, :] = k
+                        placeholder += current_batch_size
+                batch_labels = classes[batch_indices]
+                batch_folders = folders[batch_indices]
+                batch_data = util.normalise(batch_data, self.mean,
+                                            self.standard_deviation)
+
+                yield batch_data, batch_labels, batch_folders, locs_array
+        elif self.learning_procedure_dev == 'random_sample':
+            while pointer < self.dev_feat.shape[0]:
+                batch_indices = indices[pointer:pointer+self.batch_size]
+                batch_data = self.dev_feat[batch_indices]
+                batch_labels = classes[batch_indices]
+                batch_folders = folders[batch_indices]
+                batch_data = util.normalise(batch_data, self.mean,
+                                            self.standard_deviation)
+                pointer += self.batch_size
+                locs_array = np.ones((batch_data.shape[0]), dtype=np.int)
+
+                yield batch_data, batch_labels, batch_folders, locs_array
+
+    def generate_test_data(self):
+        """
+        Generates the validation batches to be used as inputs to a neural
+        network. There are different ways of processing depending on whether
+        the experiment is configured for random sampling of the data, chunked
+        sampling (for instance 30s worth of data) or using the whole file. A
+        generator is created which will be used to obtain the batch data and
+        important information is also saved in order to load the experiment
+        from a check point.
+
+        Inputs
+            epoch: The current epoch used to start validation from a checkpoint
+
+        Output
+            batch_data: Current batched data for training
+            batch_labels: Current labels associated to the batch data
+            batch_folders: Current folders associated to the batch data
+            locs_array: Array of the length of each file in the batch
+        """
+        folders = np.array(self.dev_labels[0])
+        indexes = list(range(folders.shape[0]))
+        pointer = 0
 
         if self.learning_procedure_dev == 'whole_file' or \
                 self.learning_procedure_dev == 'chunked_file':
@@ -366,21 +603,22 @@ class GenerateData:
                         else:
                             batch_data[placeholder, :, :] = k
                         placeholder += current_batch_size
-                batch_labels = classes[batch_indexes]
+
                 batch_folders = folders[batch_indexes]
                 batch_data = util.normalise(batch_data, self.mean,
                                             self.standard_deviation)
 
-                yield batch_data, batch_labels, batch_folders, locs_array
+                yield batch_data, batch_folders, locs_array
+
         elif self.learning_procedure_dev == 'random_sample':
             while pointer < self.dev_feat.shape[0]:
                 batch_indexes = indexes[pointer:pointer+self.batch_size]
                 batch_data = self.dev_feat[batch_indexes]
-                batch_labels = classes[batch_indexes]
                 batch_folders = folders[batch_indexes]
                 batch_data = util.normalise(batch_data, self.mean,
                                             self.standard_deviation)
                 pointer += self.batch_size
                 locs_array = np.ones((batch_data.shape[0]), dtype=np.int)
 
-                yield batch_data, batch_labels, batch_folders, locs_array
+                yield batch_data, batch_folders, locs_array
+

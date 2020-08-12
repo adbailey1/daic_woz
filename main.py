@@ -3,28 +3,27 @@ import logging.handlers
 import argparse
 import os
 import time
-from models_pytorch import Custom, CustomAtt
-from data_loader import organiser
+from exp_run.models_pytorch import Custom, CustomAtt
+from data_loader import organiser, organiser_test
 import shutil
-from shutil import copyfile
 import sys
 import torch
 import random
 import numpy as np
 import pandas as pd
-import dataset_processing
-import utilities as util
+import utils.utilities as util
 import socket
-import importlib
-import utilities
+from distutils.dir_util import copy_tree
 import sklearn.metrics as metrics
 from sklearn.metrics import confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.models as models
 import natsort
-import model_utilities as mu
-from plotter import plot_graph, confusion_mat
-import config_dataset
+from utils import model_utilities as mu
+from exp_run.plotter import plot_graph, confusion_mat
+from exp_run import dataset_processing
+from configs import config, config_dataset, create_exp_folder
+import pickle
 
 EPS = 1e-12
 
@@ -118,8 +117,8 @@ def calculate_accuracy(target, predict, classes_num, f_score_average):
     return accuracy, p_r_f, tn_fp_fn_tp
 
 
-def forward(generate_dev, return_target, net_params, recurrent_out,
-            convert_image):
+def forward(model, generate_dev, net_params, recurrent_out, convert_image,
+            data_type):
     """
     Pushes the data to the model and collates the outputs
 
@@ -134,20 +133,23 @@ def forward(generate_dev, return_target, net_params, recurrent_out,
         results_dict: dictionary - Outputs, optional - labels and folders
     """
     outputs = []
-    if return_target:
+    folders = []
+    if data_type == 'dev':
         targets = []
-        folders = []
+
     # Evaluate on mini-batch
     for data in generate_dev:
-        if return_target:
+        if data_type == 'dev':
             (batch_data, batch_label, batch_folder, batch_locator) = data
         else:
-            batch_data = data
+            (batch_data, batch_folder, batch_locator) = data
         # Predict
         model.eval()
+
         # Potentially speeds up evaluation and memory usage
         with torch.no_grad():
-            batch_output = get_output_from_model(data=batch_data,
+            batch_output = get_output_from_model(model=model,
+                                                 data=batch_data,
                                                  net_type=select_net,
                                                  net_params=net_params,
                                                  learning_procedure=learning_procedure_dev,
@@ -158,26 +160,26 @@ def forward(generate_dev, return_target, net_params, recurrent_out,
                                                  convert_to_image=convert_image)
         # Append data
         outputs.append(batch_output.data.cpu().numpy())
-        if return_target:
+        folders.append(batch_folder)
+        if data_type == 'dev':
             targets.append(batch_label)
-            folders.append(batch_folder)
 
     results_dict = {}
 
     outputs = np.concatenate(outputs, axis=0)
     results_dict['output'] = outputs
-    if return_target:
+    folders = np.concatenate(folders, axis=0)
+    results_dict['folder'] = np.array(folders)
+    if data_type == 'dev':
         targets = np.concatenate(targets, axis=0)
         results_dict['target'] = np.array(targets)
-        folders = np.concatenate(folders, axis=0)
-        results_dict['folder'] = np.array(folders)
 
     return results_dict
 
 
-def evaluate(generator, data_type, class_weights, comp_res, class_num,
-             f_score_average, averaging, net_p, recurrent_out, epochs,
-             convert_im):
+def evaluate(model, generator, data_type, class_weights, comp_res, class_num,
+             f_score_average, net_p, recurrent_out, epochs,
+             convert_im, logger, gender_balance=False):
     """
     Processes the validation set by creating batches, passing these through
     the model and then calculating the resulting loss and accuracy metrics.
@@ -204,68 +206,78 @@ def evaluate(generator, data_type, class_weights, comp_res, class_num,
 
     # Generate function
     print('Generating data for evaluation')
-    generate_dev = generator.generate_development_data(epoch=epochs)
+    start_time_dev = time.time()
+    if data_type == 'dev':
+        generate_dev = generator.generate_development_data(epoch=epochs)
+    else:
+        generate_dev = generator.generate_test_data()
+
     # Forward
-    start_time = time.time()
-    return_target = True
-    results_dict = forward(generate_dev=generate_dev,
-                           return_target=return_target,
+    results_dict = forward(model=model,
+                           generate_dev=generate_dev,
                            net_params=net_p,
                            recurrent_out=recurrent_out,
-                           convert_image=convert_im)
-    end_time = time.time()
-    calc_time = end_time - start_time
-    print(f"It took: {calc_time:.2f}s to process {data_type}, in evaluate mode")
-    main_logger.info(f"It took: {calc_time:.2f}s to process {data_type}, "
-                     f"in evaluate mode")
+                           convert_image=convert_im,
+                           data_type=data_type)
+
     outputs = results_dict['output']  # (audios_num, classes_num)
-    if return_target:
+    folders = results_dict['folder']
+    if data_type == 'dev':
         targets = results_dict['target']  # (audios_num, classes_num)
-        folders = results_dict['folder']
 
     if learning_procedure_decider_dev != 'whole_file':
         collected_output = {}
-        new_targets = []
+        if data_type == 'dev':
+            new_targets = []
         counter = {}
         for p, fol in enumerate(folders):
             if fol not in collected_output.keys():
                 # collected_output[fol] = [outputs[p][0]]
-                new_targets.append(targets[p])
-                collected_output[fol] = outputs[p]
+                if data_type == 'dev':
+                    new_targets.append(targets[p])
+                collected_output[fol] = outputs[p].copy()
                 counter[fol] = 1
             else:
                 # collected_output[fol].append(outputs[p][0])
-                collected_output[fol] += outputs[p]
+                collected_output[fol] += outputs[p].copy()
                 counter[fol] += 1
 
         new_outputs = []
+        new_folders = []
         for co in collected_output:
             temp = collected_output[co] / counter[co]
-            # mean_val = sum(temp) / len(temp)
             new_outputs.append(temp)
+            new_folders.append(co)
 
         outputs = np.array(new_outputs)
-        targets = np.array(new_targets)
+        folders = np.array(new_folders)
+        if data_type == 'dev':
+            targets = np.array(new_targets)
 
-    loss = mu.calculate_loss(torch.Tensor(outputs),
-                             torch.LongTensor(targets),
-                             averaging,
-                             class_weights,
-                             net_p)
+    calculate_time(start_time_dev, time.time(), 'dev', logger)
 
-    complete_results, per_epoch_pred = prediction_and_accuracy(outputs,
-                                                               targets,
-                                                               True,
-                                                               class_num,
-                                                               comp_res,
-                                                               loss, 0,
-                                                               config,
-                                                               f_score_average)
+    if data_type == 'test':
+        return outputs, folders
 
-    return complete_results, per_epoch_pred
+    if data_type == 'dev':
+        loss = mu.calculate_loss(torch.Tensor(outputs),
+                                 torch.LongTensor(targets), class_weights,
+                                 net_p, gender_balance)
+
+        if gender_balance:
+            targets = targets % 2
+        complete_results, per_epoch_pred = prediction_and_accuracy(outputs,
+                                                                   targets,
+                                                                   True,
+                                                                   class_num,
+                                                                   comp_res,
+                                                                   loss, 0,
+                                                                   config,
+                                                                   f_score_average)
+        return complete_results, per_epoch_pred
 
 
-def logging_info():
+def logging_info(current_dir, current_fold, data_type=''):
     """
     Sets up the logger to be used for the current experiment. This is useful
     to capture relevant information during the course of the experiment.
@@ -273,9 +285,18 @@ def logging_info():
     Output
         main_logger: logger - The created logger
     """
-    log_path = os.path.join(current_dir, 'log', f"model_{current_fold}.log")
+    if mode == 'test':
+        if data_type == 'test':
+            log_path = os.path.join(current_dir, "test.log")
+        elif data_type == 'dev':
+            log_path = os.path.join(current_dir, 'log',
+                                    f"model_{current_fold}_test.log")
+    else:
+        log_path = os.path.join(current_dir, 'log', f"model_{current_fold}.log")
     main_logger = logging.getLogger('MainLogger')
     main_logger.setLevel(logging.INFO)
+    if os.path.exists(log_path) and mode == 'test':
+        os.remove(log_path)
     main_handler = logging.handlers.RotatingFileHandler(log_path)
     main_logger.addHandler(main_handler)
 
@@ -290,7 +311,6 @@ def logging_info():
                              f" {str(config.EXPERIMENT_DETAILS[dict_val])}")
     main_logger.info(f"Current Seed: {chosen_seed}")
     main_logger.info(f"Logged into: {socket.gethostname()}")
-    main_logger.info('Experiment details: 1 conv: 2 FC: No-Oversampling/Class_weights')
     main_logger.info(config_dataset.SEPARATOR)
 
     return main_logger
@@ -326,7 +346,8 @@ def create_model(main_logger):
     return model
 
 
-def setup(dataset_dir, feature_experiment, data_mode):
+def setup(dataset_dir, current_dir, model_dir, feature_experiment, data_mode,
+          gender, current_fold, data_type='', path_to_logger_for_test=None):
     """
     Creates the necessary directories, data folds, logger, and model to be
     used in the experiment. It also determines whether a previous checkpoint
@@ -374,8 +395,8 @@ def setup(dataset_dir, feature_experiment, data_mode):
                                              current_dir,
                                              data_mode,
                                              dataset_dir,
-                                             config_file,
-                                             total_folds)
+                                             total_folds,
+                                             gender)
 
     if os.path.exists(current_dir) and os.path.exists(model_dir):
         temp_dirs = os.listdir(model_dir)
@@ -384,7 +405,8 @@ def setup(dataset_dir, feature_experiment, data_mode):
         if len(temp_dirs) == 0:
             pass
         else:
-            if int(temp_dirs[0].split('_')[1]) == final_iteration:
+            if int(temp_dirs[0].split('_')[1]) == final_iteration and mode ==\
+                    'train':
                 directory = model_dir.split('/')[-1]
                 final_directory = model_dir.replace(directory, 'Fold_'+str(total_folds))
                 if os.path.exists(final_directory):
@@ -392,7 +414,7 @@ def setup(dataset_dir, feature_experiment, data_mode):
                     temp_dirs2 = natsort.natsorted(temp_dirs2, reverse=True)
                     temp_dirs2 = [d for d in temp_dirs2 if '.pth' in d]
                     if int(temp_dirs2[0].split('_')[1]) == final_iteration:
-                        if i == exp_runthrough-1:
+                        if i == config.EXP_RUNTHROUGH-1:
                             print(f"A directory at this location exists: {current_dir}")
                             sys.exit()
                         else:
@@ -416,7 +438,16 @@ def setup(dataset_dir, feature_experiment, data_mode):
     elif os.path.exists(current_dir) and not os.path.exists(model_dir):
         os.mkdir(model_dir)
 
-    main_logger = logging_info()
+    if mode == 'test' and path_to_logger_for_test is not None and data_type \
+            == 'test':
+        if os.path.exists(path_to_logger_for_test):
+            shutil.rmtree(path_to_logger_for_test, ignore_errors=False,
+                          onerror=None)
+        os.mkdir(path_to_logger_for_test)
+        main_logger = logging_info(path_to_logger_for_test, current_fold,
+                                   data_type)
+    else:
+        main_logger = logging_info(current_dir, current_fold, data_type)
 
     model = create_model(main_logger)
 
@@ -450,7 +481,7 @@ def log_network_params(model, main_logger):
     #         fc_count += 1
 
 
-def record_top_results2(current_results, scores, epoch):
+def record_top_results(current_results, scores, epoch):
     """
     Function to record the best validation F1-Score up to the current epoch.
     More accurate than the alternate function record_top_results
@@ -483,38 +514,6 @@ def record_top_results2(current_results, scores, epoch):
         best_res = scores
 
     return best_res
-
-
-def record_top_results(current_results, scores, epoch):
-    """
-    Checks the current results against the previous in the experiment and
-    updates the respective accuracy metrics the current result is better than
-    the best previous result
-
-    Inputs
-        current_results: list - Output of the current accuracy metric results
-        scores: tuple - Record of the best results to data
-        epoch: int - The current epoch
-
-    Output
-        best_acc: list - updated best accuracy
-        best_fscore: list - updated best F1-Score
-        best_loss: list - updated best loss
-    """
-    if current_results[0] > scores[0][0] and epoch > 7:
-        best_acc = [current_results[0], epoch]
-    else:
-        best_acc = scores[0]
-    if current_results[1] > scores[1][0] and epoch > 7:
-        best_fscore = [current_results[1], epoch]
-    else:
-        best_fscore = scores[1]
-    if current_results[2] < scores[2][0] and epoch > 7:
-        best_loss = [current_results[2], epoch]
-    else:
-        best_loss = scores[2]
-
-    return best_acc, best_fscore, best_loss
 
 
 def initialiser(test_value):
@@ -572,7 +571,7 @@ def compile_train_val_pred(train_res, val_res, comp_train, comp_val, epoch,
 
 
 def update_complete_results(complete_results, avg_counter,
-                            placeholder, best_scores, best_scores2):
+                            placeholder, best_scores):
     """
     Finalises the complete results dataframe by calculating the mean of the 2
     class scores for accuracy and F1-Score and in the case of the training
@@ -588,15 +587,12 @@ def update_complete_results(complete_results, avg_counter,
                      for the current epoch
         placeholder: Essentially the number of epochs (but can be used in
                      iteration mode)
-        best_scores: tuple - Contains the best scores so far and the
-                     respective epochs
-        best_scores2: list - More accurate representation of the best score,
+        best_scores: list - More accurate representation of the best score,
                       gives epoch for best validation F1-Score
 
     Outputs
         complete_results: dataframe - Updated version of the complete results
-        best_scores: tuple - Updated version of best_scores
-        best_scores2: list - Updated version of best_scores2
+        best_scores: list - Updated version of best_scores
     """
     complete_results[0:11] = complete_results[0:11] / avg_counter
     # Accuracy Mean
@@ -607,18 +603,10 @@ def update_complete_results(complete_results, avg_counter,
     complete_results[24] = np.mean(complete_results[21:23])
     print_log_results(placeholder, complete_results[0:15], 'train')
     print_log_results(placeholder, complete_results[15:], 'dev')
-    best_scores[0:3] = record_top_results(complete_results[8:11],
-                                          best_scores[0:3],
-                                          placeholder)
-    best_scores[3:] = record_top_results(complete_results[23:26],
-                                         best_scores[3:],
-                                         placeholder)
 
-    best_scores2 = record_top_results2(complete_results,
-                                       best_scores2,
-                                       placeholder)
+    best_scores = record_top_results(complete_results, best_scores, placeholder)
 
-    return complete_results, best_scores, best_scores2
+    return complete_results, best_scores
 
 
 def prediction_and_accuracy(batch_output, batch_labels, initial_condition,
@@ -726,7 +714,7 @@ def print_log_results(epoch, results, data_type):
 
 
 def final_organisation(scores, train_pred, val_pred, df, patience,
-                       epoch, scores2, workspace_files_dir):
+                       epoch, workspace_files_dir):
     """
     Records final information with the logger such as the best scores for
     training and validation and saves/copies files from the current
@@ -751,11 +739,7 @@ def final_organisation(scores, train_pred, val_pred, df, patience,
                      f" {scores[1]}\nBest Train Loss: {scores[2]}\nBest Val "
                      f"Acc: {scores[3]}\nBest Val Fscore: {scores[4]}\nBest "
                      f"Val Loss: {scores[5]}")
-    main_logger.info(f"\nBEST SCORES2 at Epoch: {scores2[-1]}\nTrain Acc2:"
-                     f" {scores2[1]}\nTrain Fscore2: {scores2[4]}\nTrain "
-                     f"Loss2: {scores2[7]}\nVal Acc2: {scores2[8]}\nVal "
-                     f"Fscore2: {scores2[11]}\nVal Loss2: {scores2[14]}")
-    main_logger.info(f"\nscores: {scores2[1:-1]}")
+    main_logger.info(f"\nscores: {scores[1:-1]}")
 
     if epoch == final_iteration:
         main_logger.info(f"System will exit as the total number of "
@@ -765,18 +749,9 @@ def final_organisation(scores, train_pred, val_pred, df, patience,
                          f"has not improved for {patience} epochs")
     print(f"System will exit as the validation loss has not "
           "improved for {patience} epochs")
-    utilities.save_model_outputs(model_dir, df, train_pred, val_pred, scores,
-                                 scores2[1:])
+    util.save_model_outputs(model_dir, df, train_pred, val_pred, scores[1:])
 
-    copyfile(workspace_files_dir + '/models_pytorch.py',
-             current_dir + '/model_architecture.py')
-    copyfile(workspace_files_dir + '/main.py', current_dir + '/main.py')
-    copyfile(workspace_files_dir + '/data_loader/data_gen.py',
-             current_dir + '/data_gen.py')
-    copyfile(workspace_files_dir + '/data_loader/organiser.py',
-             current_dir + '/organiser.py')
-    copyfile(workspace_files_dir + '/' + config_file + '.py', current_dir +
-             '/' + config_file + '.py')
+    copy_tree(workspace_files_dir, current_dir+'/daic')
 
 
 def reduce_learning_rate(optimizer):
@@ -811,46 +786,6 @@ def reproducibility(chosen_seed):
     torch.backends.cudnn.benchmark = False
     np.random.seed(chosen_seed)
     random.seed(chosen_seed)
-
-
-def get_rnn_feats(net_params, current_batch_size):
-    """
-    Function to setup the initial conditions to be used in any RNN layers.
-    h0 will need to be created and if LSTM is used then c0 will also be
-    created. The layers are increased if the RNN is bidirectional
-
-    Inputs
-        net_params: Used to determine what type of RNN is used
-        current_batch_size: The size of the current batch being processed
-
-    Output
-        hc: The initialised hidden layers for the RNN
-    """
-    if 'LSTM_1' in net_params or 'GRU_1' in net_params:
-        if 'LSTM_1' in net_params:
-            rnn_feats = net_params['LSTM_1'][1]
-            bidi = net_params['LSTM_1'][-1]
-            layers = net_params['LSTM_1'][2]
-        else:
-            rnn_feats = net_params['GRU_1'][1]
-            bidi = net_params['GRU_1'][-1]
-            layers = net_params['GRU_1'][2]
-        if bidi:
-            b = 2 * layers
-        else:
-            b = 1 * layers
-        h0 = np.random.randn(b, current_batch_size, rnn_feats)
-        h0 = mu.create_tensor_data(h0, cuda, select_net)
-        if 'LSTM_1' in net_params:
-            c0 = np.random.randn(b, current_batch_size, rnn_feats)
-            c0 = mu.create_tensor_data(c0, cuda, select_net)
-            hc = (h0, c0)
-        else:
-            hc = h0
-    else:
-        hc = (torch.zeros(1), torch.zeros(1))
-
-    return hc
 
 
 def collate_net_outputs(output, output_att=None, net_params='SOFTMAX_1',
@@ -914,7 +849,7 @@ def collate_net_outputs(output, output_att=None, net_params='SOFTMAX_1',
     return output
 
 
-def get_output_from_model(data, net_type, net_params, learning_procedure,
+def get_output_from_model(model, data, net_type, net_params, learning_procedure,
                           learning_procedure_decider, locator=[],
                           label='', recurrent_out='whole',
                           convert_to_image=False):
@@ -928,6 +863,7 @@ def get_output_from_model(data, net_type, net_params, learning_procedure,
     the final layer of the network (softmax or sigmoid)
 
     Inputs:
+        model: object - the NN used for experimentation
         data: Data to be pushed to the model
         net_type: What model is used?
         net_params: The model configuration - includes layers and filter data
@@ -939,7 +875,8 @@ def get_output_from_model(data, net_type, net_params, learning_procedure,
         locator: Array of the lengths of the files in the batch
         label: Set to train or dev depending on the section of experiment
         recurrent_out: If RNN is used, how is the output processed?
-
+        convert_to_im: Bool, are we converting the spectrograms to 3D via
+        delta and d-delta calculation?
     Output
         output: The output of the model from the input batch data
     """
@@ -961,7 +898,6 @@ def get_output_from_model(data, net_type, net_params, learning_procedure,
             output = torch.zeros(current_batch_size, 1)
 
         placeholder = 0
-        hc = get_rnn_feats(net_params, current_batch_size)
 
         output_net = torch.zeros(current_batch_size, segments)
         attout_net = torch.zeros(current_batch_size, segments)
@@ -971,9 +907,17 @@ def get_output_from_model(data, net_type, net_params, learning_procedure,
                                                  cuda,
                                                  select_net)
             if 'ATTENTION_global' in net_params:
-                temp_out, hc, temp_att = model(current_data, net_params,
-                                               convert_to_image, hc,
-                                               recurrent_out, label)
+                if p == 0:
+                    temp_out, hc, temp_att = model(current_data, net_params,
+                                                   convert_to_image,
+                                                   recurrent_out=recurrent_out,
+                                                   label=label)
+                else:
+                    temp_out, hc, temp_att = model(current_data, net_params,
+                                                   convert_to_image,
+                                                   hidden=hc,
+                                                   recurrent_out=recurrent_out,
+                                                   label=label)
                 if label == 'dev':
                     zero_out_index = torch.ones((temp_out.shape[0], 1))
                     for pos, loc in enumerate(locator):
@@ -989,14 +933,25 @@ def get_output_from_model(data, net_type, net_params, learning_procedure,
                 attout_net[:, p] = temp_att.reshape(current_batch_size)
             else:
                 if 'LSTM_1' in net_params or 'GRU_1' in net_params:
-                    output_net, hc, _ = model(current_data, net_params,
-                                              convert_to_image, hc,
-                                              recurrent_out, label, locator)
+                    if p == 0:
+                        output_net, hc, _ = model(current_data, net_params,
+                                                  convert_to_image,
+                                                  recurrent_out=recurrent_out,
+                                                  label=label,
+                                                  locator=locator)
+                    else:
+                        output_net, hc, _ = model(current_data, net_params,
+                                                  convert_to_image,
+                                                  hidden=hc,
+                                                  recurrent_out=recurrent_out,
+                                                  label=label,
+                                                  locator=locator)
                 else:
                     output_net, _, _ = model(current_data, net_params,
                                              convert_to_image,
                                              recurrent_out=recurrent_out,
-                                             label=label, locator=locator)
+                                             label=label,
+                                             locator=locator)
                 if label == 'dev':
                     zero_out_index = torch.ones((output_net.shape[0], 1))
                     for pos, loc in enumerate(locator):
@@ -1113,6 +1068,20 @@ def begin_evaluation(mode, epoch, reset, iteration, iteration_epoch):
         sys.exit()
 
 
+def calculate_time(start_time, end_time, mode_label, main_logger, placeholder=0,
+                   iteration=0):
+    calc_time = end_time - start_time
+    if mode_label == 'train':
+        print(f"Iteration: {iteration}\nTime taken for {mode_label}:"
+              f" {calc_time:.2f}s")
+        main_logger.info(f"Time taken for {mode_label}: {calc_time:.2f}s "
+                         f"at iteration: {iteration}, epoch: {placeholder}")
+    else:
+        print(f"\nTime taken to evaluate {mode_label}: {calc_time:.2f}s")
+        main_logger.info(f"Time taken to evaluate {mode_label}:"
+                         f" {calc_time:.2f}s")
+
+
 def train(model, feature_experiment, workspace_files_dir, convert_to_im):
     """
     Sets up the experiment and runs the experiment. The training batches are
@@ -1128,30 +1097,33 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
         convert_to_im: book - Set True if the data is to be converted to 3D
     """
     num_of_classes = len(config_dataset.LABELS)
-
     writers = SummaryWriter(f"./runs/{feature_experiment}_{sub_dir}_F{current_fold}")
-    generator, cw_train, cw_dev, total_num_zeros, total_num_ones, \
-        = organiser.run(config, main_logger, current_fold, checkpoint)
 
-    print('Generating data for training')
     learning_rate = config.EXPERIMENT_DETAILS['LEARNING_RATE']
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     main_logger.info(f"Optimiser: ADAM. Learning Rate: {learning_rate}")
-
     if checkpoint:
-        start_epoch, data_saver = utilities.load_model(checkpoint_run, model,
-                                                       optimizer)
-        df, comp_train_pred, comp_val_pred, best_scores, best_scores2 = \
-            utilities.load_model_outputs(model_dir)
+        start_epoch, data_saver = util.load_model(checkpoint_run, model,
+                                                  optimizer)
+        df, comp_train_pred, comp_val_pred, best_scores = \
+            util.load_model_outputs(model_dir)
         counter = start_epoch
     else:
         start_epoch = 0
         # train_acc, train_fscore, train_loss, val_acc, val_fscore, val_loss
-        best_scores = [[0, 0], [0, 0], [1e7, 0], [0, 0], [0, 0], [1e7, 0]]
-        best_scores2 = [0] * 16
+        best_scores = [0] * 16
         comp_train_pred = comp_val_pred = 0
         df = pd.DataFrame(columns=config_dataset.COLUMN_NAMES)
         data_saver = {}
+
+    print('Generating data for training')
+    # train_info tuple of number of zeros, ones and class weights and if
+    # gender balance is specified, gender weights (also tuple of
+    # (fem_nd_w, fem_d_w, male_nd_w, male_d_w)
+    gen, train_info = organiser.run(config, main_logger, current_fold,
+                                    checkpoint, data_fold_dir,
+                                    data_fold_dir_equal, features_dir,
+                                    data_saver)
 
     avg_counter = per_epoch_train_pred = 0
     # Train/Val, Accuracy, Precision, Recall, Fscore, Loss(single), mean_acc/f
@@ -1160,19 +1132,24 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
     net_params = config.NETWORK_PARAMS
     recurrent_out = config.RECURRENT_OUT
     learn_rate_factor = 6
+    gender_balance = config.EXPERIMENT_DETAILS['USE_GENDER_WEIGHTS']
+    cw = train_info[-1]
+    start_new_timer = False
+    start_timer = time.time()
     print('Beginning Training')
-    for (iteration, (batch_data, batch_labels, epoch, reset, train_batch_loc,
-                     data_saver)) in enumerate(generator.generate_train_data(
-        start_epoch, data_saver)):
-        start_timer = time.time()
+    # batch is tuple of data, labels, epoch and reset
+    for (iteration, (batch, train_batch_loc, data_saver)) in enumerate(
+            gen.generate_train_data(start_epoch)):
+        if iteration == 22:
+            print(iteration)
+        if start_new_timer:
+            start_timer = time.time()
+            start_new_timer = False
         avg_counter += 1
-
         model.train()
-        batch_labels = mu.create_tensor_data(batch_labels,
-                                             cuda,
-                                             select_net,
-                                             True)
-        batch_output = get_output_from_model(data=batch_data,
+        batch_labels = mu.create_tensor_data(batch[1], cuda, select_net, True)
+        batch_output = get_output_from_model(model=model,
+                                             data=batch[0],
                                              net_type=select_net,
                                              net_params=net_params,
                                              learning_procedure=learning_procedure_train,
@@ -1182,8 +1159,10 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
                                              recurrent_out=recurrent_out,
                                              convert_to_image=convert_to_im)
 
-        train_loss = mu.calculate_loss(batch_output, batch_labels, averaging,
-                                       cw_train, net_params)
+        train_loss = mu.calculate_loss(batch_output, batch_labels, cw,
+                                       net_params, gender_balance)
+        if gender_balance:
+            batch_labels = batch_labels % 2
 
         # Zero the gradient and Backprop the loss through the network
         optimizer.zero_grad()
@@ -1196,43 +1175,31 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
                                     num_of_classes, complete_results[0:15],
                                     train_loss, per_epoch_train_pred, config)
 
-        begin_evaluate = begin_evaluation(analysis_mode, epoch, reset,
+        begin_evaluate = begin_evaluation(analysis_mode, batch[-2], batch[-1],
                                           iteration, iteration_epoch)
         if begin_evaluate:
             if analysis_mode == 'epoch':
-                print(best_scores2)
-                placeholder = epoch
+                placeholder = batch[-2]
             else:
-                counter += 1
-                placeholder = counter
+                # counter += 1
+                placeholder = iteration_epoch // learn_rate_factor
 
             if validate:
-                print(f"Evaluating - Training at epoch: {placeholder}, "
-                      f"iteration: {iteration}\nTime taken for training: ' "
-                      f"{time.time()-start_timer}")
-                main_logger.info(f"Time taken for training:"
-                                 f" {time.time() - start_timer} at iteration:"
-                                 f" {iteration}")
+                start_new_timer = True
+                calculate_time(start_timer, time.time(), 'train', main_logger,
+                               placeholder, iteration)
                 print('Evaluating - Development at epoch: ', placeholder)
                 (complete_results[15:], per_epoch_val_pred) = evaluate(
-                    generator=generator,
-                    data_type='dev',
-                    class_weights=cw_dev,
-                    comp_res=complete_results[15:],
-                    class_num=num_of_classes,
-                    f_score_average=None,
-                    averaging=averaging,
-                    net_p=net_params,
-                    recurrent_out=recurrent_out,
-                    epochs=start_epoch,
-                    convert_im=convert_to_im)
+                    model=model, generator=gen, data_type='dev',
+                    class_weights=cw, comp_res=complete_results[15:],
+                    class_num=num_of_classes, f_score_average=None,
+                    net_p=net_params, recurrent_out=recurrent_out,
+                    epochs=start_epoch, convert_im=convert_to_im,
+                    logger=main_logger, gender_balance=gender_balance)
 
-                complete_results, best_scores, best_scores2 = \
-                    update_complete_results(complete_results, avg_counter,
-                                            placeholder, best_scores,
-                                            best_scores2)
+                complete_results, best_scores = update_complete_results(
+                    complete_results, avg_counter, placeholder, best_scores)
                 avg_counter = 0
-
                 df.loc[placeholder-1] = complete_results
 
                 complete_results = np.zeros(30)
@@ -1247,16 +1214,17 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
                 placeholder,
                 net_params)
 
-            # Save model
-            utilities.save_model(placeholder, model, optimizer, main_logger,
-                                 model_dir, data_saver)
-            tensorboard_visual(writers, df, epoch)
-            utilities.save_model_outputs(model_dir, df, comp_train_pred,
-                                         comp_val_pred, best_scores,
-                                         best_scores2)
             # Reduce learning rate
             if placeholder % learn_rate_factor == 0:
                 reduce_learning_rate(optimizer)
+
+            # Save model
+            data_saver['class_weights'] = cw
+            util.save_model(placeholder, model, optimizer, main_logger,
+                            model_dir, data_saver)
+            #tensorboard_visual(writers, df, batch[-2])
+            util.save_model_outputs(model_dir, df, comp_train_pred,
+                                    comp_val_pred, best_scores)
 
             # Stop learning
             patience = final_iteration+1
@@ -1269,8 +1237,7 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
                           f"Current {trial}")
                     final_organisation(best_scores, comp_train_pred,
                                        comp_val_pred, df, patience,
-                                       placeholder, best_scores2,
-                                       workspace_files_dir)
+                                       placeholder, workspace_files_dir)
 
                     plot_graph(placeholder, df, final_iteration, model_dir,
                                early_stopper=True, vis=vis)
@@ -1278,12 +1245,111 @@ def train(model, feature_experiment, workspace_files_dir, convert_to_im):
             elif placeholder == final_iteration:
                 final_organisation(best_scores, comp_train_pred,
                                    comp_val_pred, df, patience, placeholder,
-                                   best_scores2, workspace_files_dir)
-                break
+                                   workspace_files_dir)
+                return best_scores
 
 
 def test():
-    pass
+    if validate:
+        tester = False
+        data_type = 'dev'
+    else:
+        tester = True
+        data_type = 'test'
+
+    counter = 0
+    for exp_num in range(config.EXP_RUNTHROUGH):
+        sub_dir_one = config.EXPERIMENT_DETAILS['SUB_DIR']
+        sub_dir = sub_dir_one + config.FOLDER_EXTENSIONS[exp_num]
+        for current_fold in range(1, total_folds + 1):
+            placeholder = str(exp_num+1) + '-' + str(current_fold)
+            current_dir = os.path.join(features_dir, sub_dir + '_' + exp_name)
+            model_dir = os.path.join(current_dir, 'model', f"Fold"
+                                                           f"_{current_fold}")
+            if data_type == 'test':
+                path_to_logger_for_test = os.path.join(features_dir,
+                                                       sub_dir_one + '_test')
+            else:
+                path_to_logger_for_test = None
+
+            if data_type == 'test' and counter == 0 or data_type == 'dev':
+                main_logger, model, _, _, _, _ = setup(config.DATASET,
+                                                       current_dir, model_dir,
+                                                       config.EXPERIMENT_DETAILS['FEATURE_EXP'],
+                                                       config.EXPERIMENT_DETAILS['MODE'],
+                                                       gender, current_fold,
+                                                       data_type,
+                                                       path_to_logger_for_test)
+            num_of_classes = len(config_dataset.LABELS)
+
+            optimizer = torch.optim.Adam(model.parameters())
+            net_params = config.NETWORK_PARAMS
+            recurrent_out = config.RECURRENT_OUT
+            convert_to_im = config.EXPERIMENT_DETAILS['CONVERT_TO_IMAGE']
+            gender_balance = config.EXPERIMENT_DETAILS['USE_GENDER_WEIGHTS']
+
+            for file in os.listdir(model_dir):
+                if file.endswith(".pth"):
+                    current_epoch = int(file.split('_')[1])
+                    model_dir = os.path.join(model_dir, file)
+
+            _, data_saver = util.load_model(checkpoint_path=model_dir,
+                                            model=model, optimizer=optimizer)
+
+            if data_type == 'test' and counter == 0 or data_type == 'dev':
+                generator, cw = organiser_test.run(config, main_logger,
+                                                   current_fold, False,
+                                                   data_fold_dir,
+                                                   data_fold_dir_equal,
+                                                   features_dir, data_saver,
+                                                   tester)
+            f_score = None
+            if data_type == 'dev':
+                scores, per_epoch = evaluate(model, generator, data_type,
+                                             cw[-1], np.zeros(30),
+                                             num_of_classes, f_score,
+                                             net_params, recurrent_out,
+                                             current_epoch, convert_to_im,
+                                             main_logger, gender_balance)
+
+                scores[8] = np.mean(scores[0:2])
+                scores[9] = np.mean(scores[6:8])
+                scores = [scores[8], scores[0], scores[1], scores[9],
+                          scores[6], scores[7]]
+                print(scores)
+                scores, per_epoch = evaluate(model, generator, data_type,
+                                             cw[-1], np.zeros(30),
+                                             num_of_classes, f_score,
+                                             net_params, recurrent_out,
+                                             current_epoch, convert_to_im,
+                                             main_logger, gender_balance)
+
+                scores[8] = np.mean(scores[0:2])
+                scores[9] = np.mean(scores[6:8])
+                scores = [scores[8], scores[0], scores[1], scores[9],
+                          scores[6], scores[7]]
+                print(scores)
+                main_logger.info(f"Scores are: \n{scores}")
+            else:
+                pred, folders = evaluate(model, generator, data_type, cw[-1],
+                                         np.zeros(30), num_of_classes,
+                                         f_score, 'arithmetic', net_params,
+                                         recurrent_out, current_epoch,
+                                         convert_to_im, main_logger)
+                pred = np.round(pred).astype(int)
+                if counter == 0:
+                    df = pd.DataFrame(data=pred, index=list(folders),
+                                      columns=[placeholder])
+                    counter += 1
+                else:
+                    df[placeholder] = pred
+
+    if data_type == 'test':
+        df['majority'] = df.mode(axis=1)[0]
+        main_logger.info(df)
+        save_loc = os.path.join(path_to_logger_for_test, 'test_results.pickle')
+        with open(save_loc, 'wb') as f:
+            pickle.dump(df, f)
 
 
 if __name__ == '__main__':
@@ -1311,85 +1377,103 @@ if __name__ == '__main__':
                              help='determine whether model graph is output')
     parser_test.add_argument('--cuda', action='store_true', default=False,
                              help='pass --cuda if you want to run on GPU')
+    parser_test.add_argument('--validate', action='store_true',
+                             default=False, help='Do you want to run the '
+                                                 'respective validation folds '
+                                                 'used during training in '
+                                                 'testing?')
+    parser_test.add_argument('--debug', action='store_true', default=False,
+                             help='set the program to run in debug mode '
+                                   'means, that the most recent folder will '
+                                   'be deleted automatically to speed up '
+                                   'debugging')
 
     args = parser.parse_args()
 
+    mode = args.mode
     debug = args.debug
-    validate = args.validate
     vis = args.vis
     cuda = args.cuda
-    cf = 'config'
+    validate = args.validate
+    workspace_main_dir = config.WORKSPACE_MAIN_DIR
+    features_dir = os.path.join(workspace_main_dir,
+                                create_exp_folder.FOLDER_NAME)
+    gender = config.GENDER
+    if gender == 'm' or gender == 'f':
+        features_dir = features_dir + '_gen'
+    print('feature_dir:', features_dir)
+    total_folds = config.EXPERIMENT_DETAILS['TOTAL_FOLDS']
+    chosen_seed = config.EXPERIMENT_DETAILS['SEED']
+    exp_name = create_exp_folder.EXP_NAME
+    analysis_mode = config.ANALYSIS_MODE
+    learning_procedure_decider_train = config.LEARNING_PROCEDURE_DECIDER_TRAIN
+    learning_procedure_decider_dev = config.LEARNING_PROCEDURE_DECIDER_DEV
+    learning_procedure_train = config.LEARNING_PROCEDURE_TRAIN
+    learning_procedure_dev = config.LEARNING_PROCEDURE_DEV
+    averaging = config.AVERAGING
+    select_net = config.EXPERIMENT_DETAILS['NETWORK']
 
-    config_extensions = ['1']
-    for ext in config_extensions:
-        config_file = cf+'_'+str(ext)
-        if not os.path.exists(config_file):
-            config = importlib.import_module(config_file)
-        else:
-            config = importlib.import_module(cf)
+    data_fold_dir = os.path.join(workspace_main_dir,
+                                 'data_folds_'+str(total_folds))
 
-        workspace_main_dir = config.WORKSPACE_MAIN_DIR
-        features_dir = os.path.join(workspace_main_dir, config.FOLDER_NAME)
-        print('feature_dir:', features_dir)
-        total_folds = config.EXPERIMENT_DETAILS['TOTAL_FOLDS']
-        chosen_seed = config.EXPERIMENT_DETAILS['SEED']
-        exp_name = config.EXP_NAME
-        analysis_mode = config.ANALYSIS_MODE
-        learning_procedure_decider_train = config.LEARNING_PROCEDURE_DECIDER_TRAIN
-        learning_procedure_decider_dev = config.LEARNING_PROCEDURE_DECIDER_DEV
-        learning_procedure_train = config.LEARNING_PROCEDURE_TRAIN
-        learning_procedure_dev = config.LEARNING_PROCEDURE_DEV
-        averaging = config.AVERAGING
-        select_net = config.EXPERIMENT_DETAILS['NETWORK']
+    if gender == 'm' or gender == 'f':
+        data_fold_dir = data_fold_dir + '_' + gender
 
-        data_fold_dir = os.path.join(workspace_main_dir,
-                                     'data_folds_'+str(total_folds))
-        data_fold_dir_equal = data_fold_dir + '_equal'
+    data_fold_dir_equal = data_fold_dir + '_equal'
 
-        iteration_epoch = config.EXPERIMENT_DETAILS['ITERATION_EPOCH']
-        if analysis_mode == 'epoch':
-            final_iteration = config.EXPERIMENT_DETAILS['TOTAL_EPOCHS']
-        elif analysis_mode == 'iteration':
-            final_iteration = config.EXPERIMENT_DETAILS['TOTAL_ITERATIONS']
-            final_iteration = round(final_iteration / iteration_epoch)
+    iteration_epoch = config.EXPERIMENT_DETAILS['ITERATION_EPOCH']
+    if analysis_mode == 'epoch':
+        final_iteration = config.EXPERIMENT_DETAILS['TOTAL_EPOCHS']
+    elif analysis_mode == 'iteration':
+        final_iteration = config.EXPERIMENT_DETAILS['TOTAL_ITERATIONS']
+        final_iteration = round(final_iteration / iteration_epoch)
 
-        folder_extensions = ['a', 'b', 'c', 'd', 'e']
-        exp_runthrough = 5
-        if args.mode == 'train':
-            for i in range(exp_runthrough):
-                sub_dir = config.EXPERIMENT_DETAILS['SUB_DIR']
-                sub_dir = sub_dir+folder_extensions[i]
-                for current_fold in range(1, total_folds+1):
-                    current_dir = os.path.join(features_dir,
-                                               sub_dir + '_' + exp_name)
-                    model_dir = os.path.join(current_dir,
-                                             'model',
-                                             f"Fold_{current_fold}")
-                    main_logger, model, checkpoint_run, checkpoint, \
-                        next_fold, next_exp = setup(config.DATASET,
-                                              config.EXPERIMENT_DETAILS[
-                                               'FEATURE_EXP'],
-                                              config.EXPERIMENT_DETAILS['MODE'])
-                    if next_exp:
-                        break
+    final_scores = np.zeros((config.EXP_RUNTHROUGH*total_folds, 16))
+    counter = 0
+    if args.mode == 'train':
+        for i in range(config.EXP_RUNTHROUGH):
+            sub_dir = config.EXPERIMENT_DETAILS['SUB_DIR']
+            sub_dir = sub_dir+config.FOLDER_EXTENSIONS[i]
+            for current_fold in range(1, total_folds+1):
+                current_dir = os.path.join(features_dir,
+                                           sub_dir + '_' + exp_name)
+                model_dir = os.path.join(current_dir,
+                                         'model',
+                                         f"Fold_{current_fold}")
+                main_logger, model, checkpoint_run, checkpoint, \
+                    next_fold, next_exp = setup(config.DATASET,
+                                                current_dir,
+                                                model_dir,
+                                          config.EXPERIMENT_DETAILS[
+                                           'FEATURE_EXP'],
+                                          config.EXPERIMENT_DETAILS['MODE'],
+                                          gender, current_fold)
+                if next_exp:
+                    break
 
-                    if next_fold:
-                        continue
+                if next_fold:
+                    continue
 
-                    comp_start_time = time.time()
-                    train(model, config.EXPERIMENT_DETAILS['FEATURE_EXP'],
-                          config.WORKSPACE_FILES_DIR,
-                          config.EXPERIMENT_DETAILS['CONVERT_TO_IMAGE'])
-                    comp_end_time = time.time()
-                    complete_time = comp_end_time - comp_start_time
-                    main_logger.info(f"Complete time to run model:"
-                                     f" {complete_time}")
-                    handlers = main_logger.handlers[:]
-                    for handler in handlers:
-                        handler.close()
-                        main_logger.removeHandler(handler)
-                chosen_seed += 100
-        elif args.mode == 'test':
-            test()
-        else:
-            raise Exception('There has been an error in the input arguments')
+                comp_start_time = time.time()
+                scores = train(model, config.EXPERIMENT_DETAILS['FEATURE_EXP'],
+                               config.WORKSPACE_FILES_DIR,
+                               config.EXPERIMENT_DETAILS['CONVERT_TO_IMAGE'])
+                final_scores[counter, :] = np.array(scores)
+                counter += 1
+                if counter == 20:
+                    mean_scores = np.mean(final_scores, axis=0)
+                    main_logger.info(f"{final_scores}")
+                    main_logger.info(f"{list(mean_scores)}")
+                comp_end_time = time.time()
+                complete_time = comp_end_time - comp_start_time
+                main_logger.info(f"Complete time to run model:"
+                                 f" {complete_time}")
+                handlers = main_logger.handlers[:]
+                for handler in handlers:
+                    handler.close()
+                    main_logger.removeHandler(handler)
+            chosen_seed += 100
+    elif args.mode == 'test':
+        test()
+    else:
+        raise Exception('There has been an error in the input arguments')

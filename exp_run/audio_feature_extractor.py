@@ -156,8 +156,7 @@ def create_delta(feature, n_total=2, delta_order=2):
                                                     delta_order-1)))
 
 
-def feature_segmenter(feature, folder, clss, score, feature_exp, dim,
-                      convert_to_image=False):
+def feature_segmenter(feature, meta, feature_exp, dim, convert_to_image=False):
     """
     Segments the features into dimensions specified by feature.shape[-1] and
     dim. The number of extra dimensions is used to create lists of the
@@ -230,11 +229,13 @@ def feature_segmenter(feature, folder, clss, score, feature_exp, dim,
         new_features[:, :, :] = np.split(feature, num_extra_dimensions,
                                          axis=1)
 
-    new_folders = [folder] * num_extra_dimensions
-    new_classes = [clss] * num_extra_dimensions
-    new_scores = [score] * num_extra_dimensions
+    new_folders = [meta[0]] * num_extra_dimensions
+    new_classes = [meta[1]] * num_extra_dimensions
+    new_scores = [meta[2]] * num_extra_dimensions
+    new_gender = [meta[3]] * num_extra_dimensions
 
-    return new_features, new_folders, new_classes, new_scores, new_indexes
+    return (new_features, new_folders, new_classes, new_scores, new_gender,
+            new_indexes)
 
 
 def moving_average(data, N, decimation=False):

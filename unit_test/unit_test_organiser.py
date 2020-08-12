@@ -1,7 +1,7 @@
 import logging
 import os
 import pickle
-import utilities
+from utils import utilities
 from data_loader import organiser
 from unit_test import config_test
 import numpy as np

@@ -87,7 +87,7 @@ def load_model(checkpoint_path, model, optimizer):
 
 
 def save_model_outputs(model_dir, dataframe, train_pred, val_pred,
-                       best_scores, best_scores_2):
+                       best_scores):
     """
     Saves the outputs of a model for checkpointing or future analysis for a
     completed experiment.
@@ -114,7 +114,7 @@ def save_model_outputs(model_dir, dataframe, train_pred, val_pred,
 
     save_path = os.path.join(model_dir, 'best_scores.pickle')
     with open(save_path, 'wb') as f:
-        pickle.dump((best_scores, best_scores_2[1:]), f)
+        pickle.dump(best_scores[1:], f)
 
 
 def load_model_outputs(model_dir):

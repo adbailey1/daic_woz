@@ -1,8 +1,7 @@
 import numpy as np
-import dataset_processing
+from exp_run import dataset_processing
 import time
-import random
-import utilities
+from utils import utilities
 
 
 def create_folds_test(dp):

@@ -2,10 +2,11 @@ import os
 import pickle
 import torch
 import numpy as np
-import utils.utilities as util
+from utils import utilities as util
 from data_loader import data_gen
 from exp_run import audio_feature_extractor as afe
-import pandas as pd
+from scipy import interpolate
+import cv2
 
 
 def get_updated_features(data, min_samples, label, meta, logger, segment_dim,
@@ -51,7 +52,6 @@ def get_updated_features(data, min_samples, label, meta, logger, segment_dim,
                         f"{reshaped_data.shape[0]} by"
                         f" {reshaped_data.shape[1]}")
 
-    # tuple in form of features, folders, classes, scores, genders, indices
     new_meta_data = afe.feature_segmenter(reshaped_data, meta, feature_exp,
                                           segment_dim, convert_to_image)
     return new_meta_data
@@ -89,8 +89,8 @@ def calculate_length(data, min_samples, label, segment_dim, freq_bins,
     return length
 
 
-def process_data(amcs, freq_bins, features, labels, label,
-                 min_samples, logger, segment_dim, convert_to_im, feature_exp):
+def process_data(amcs, freq_bins, features, labels, mode_label, min_samples,
+                 logger, segment_dim, convert_to_im, feature_exp):
     """
     Determine the array size of the dataset once it has been reshaped into
     segments of length equal to that specified in the config file for feature
@@ -102,7 +102,7 @@ def process_data(amcs, freq_bins, features, labels, label,
         freq_bins: Number of bins for the feature. eg logmel - 64
         features: Array of the features in the database
         labels; Labels corresponding to the features in the database
-        label: Set for 'train', 'dev', or 'test'
+        mode_label: Set for 'train', 'dev', or 'test'
         min_samples: The size of the shortest file in the database
         logger: The main logger for recording important information
         segment_dim: The segmentation dimensions for the updated data
@@ -123,10 +123,10 @@ def process_data(amcs, freq_bins, features, labels, label,
     length = 0
     for pointer, i in enumerate(labels[0, :]):
         i = features[pointer, 0]
-        temp_length = calculate_length(i, min_samples, label, segment_dim,
-                                       freq_bins, amcs)
+        temp_length = calculate_length(i, min_samples, mode_label,
+                                       segment_dim, freq_bins, amcs)
 
-        if not amcs and label != 'dev':
+        if not amcs and mode_label != 'dev':
             length = temp_length * features.shape[0]
             break
         length += temp_length
@@ -156,9 +156,9 @@ def process_data(amcs, freq_bins, features, labels, label,
         # Folder, class, score, gender
         meta = [labels[0][i], labels[1][i], labels[2][i], labels[3][i]]
         (new_features, new_folders, new_classes, new_scores, new_genders,
-         new_indices) = get_updated_features(data, min_samples, label, meta,
-                                             logger, segment_dim, freq_bins,
-                                             amcs, convert_to_im,
+         new_indices) = get_updated_features(data, min_samples, mode_label,
+                                             meta, logger, segment_dim,
+                                             freq_bins, amcs, convert_to_im,
                                              initialiser, feature_exp)
         initialiser += 1
 
@@ -184,9 +184,9 @@ def process_data(amcs, freq_bins, features, labels, label,
             final_indices.append(new_indices.tolist())
         pointer += z
 
-    print(f"The dimensions of the {label} features are:"
+    print(f"The dimensions of the {mode_label} features are:"
           f" {update_features.shape}")
-    logger.info(f"The dimensions of the {label} features are:"
+    logger.info(f"The dimensions of the {mode_label} features are:"
                 f" {update_features.shape}")
     if type(final_folders[0]) is list:
         final_folders = [j for i in final_folders for j in i]
@@ -258,12 +258,9 @@ def file_paths(features_dir, config, logger, current_fold, data_fold_dir,
     logger.info(f"Training Folds: {folds_for_train}, "
                 f"Dev Folds: {folds_for_dev}")
 
-    train_meta_file = [os.path.join(features_dir, folder,
-                                    f"Fold_{num}.pickle") for num in
-                       folds_for_train]
-
     dev_meta_file = os.path.join(features_dir, data_fold_dir,
                                  f"Fold_{folds_for_dev}.pickle")
+    test_meta_file = os.path.join(features_dir, data_fold_dir, 'test.pickle')
     sum_file = os.path.join(features_dir, 'summary.pickle')
     if config.GENDER == 'm' or config.GENDER == 'f':
         h5_database = os.path.join(features_dir,
@@ -271,7 +268,7 @@ def file_paths(features_dir, config, logger, current_fold, data_fold_dir,
     else:
         h5_database = os.path.join(features_dir, 'complete_database.h5')
 
-    return train_meta_file, dev_meta_file, sum_file, h5_database
+    return dev_meta_file, test_meta_file, sum_file, h5_database
 
 
 def find_weight(zeros, ones):
@@ -317,6 +314,7 @@ def data_info(labels, value, logger, config):
         class_weights: The class weights for current set
     """
     zeros, zeros_index, ones, ones_index = util.count_classes(labels[1])
+
     print(f"The number of class zero and one files in the {value} split after "
           f"segmentation are {zeros}, {ones}")
     logger.info(f"The number of class zero files in the {value} split "
@@ -425,35 +423,6 @@ def determine_seconds_segment(seconds_segment, feature_dim, window_size, hop,
     return seconds_segment
 
 
-def gender_split_indices(data):
-    if isinstance(data, list):
-        data = np.array(data)
-    male_dep_indices = list(np.where((data[1, :] == 1) & (data[-2, :] == 1))[0])
-    male_ndep_indices = list(np.where((data[1, :] == 0) & (data[-2, :] ==
-                                                           1))[0])
-    female_dep_indices = list(np.where((data[1, :] == 1) & (data[-2, :] ==
-                                                            0))[0])
-    female_ndep_indices = list(np.where((data[1, :] == 0) & (data[-2, :] ==
-                                                             0))[0])
-
-    male_dep = len(male_dep_indices)
-    male_ndep = len(male_ndep_indices)
-    fem_dep = len(female_dep_indices)
-    fem_ndep = len(female_ndep_indices)
-
-    min_value = min([male_dep, male_ndep, fem_dep, fem_ndep])
-
-    fem_nd_w = find_weight(fem_ndep, min_value)
-    fem_d_w = find_weight(fem_dep, min_value)
-    male_nd_w = find_weight(male_ndep, min_value)
-    male_d_w = find_weight(male_dep, min_value)
-    weights = (torch.Tensor(fem_nd_w), torch.Tensor(fem_d_w),
-               torch.Tensor(male_nd_w), torch.Tensor(male_d_w))
-
-    return female_ndep_indices, female_dep_indices, male_ndep_indices, \
-           male_dep_indices, weights
-
-
 def organise_data(config, logger, file, database, min_samples,
                   learning_procedure, mode_label='train'):
     amcs = config.EXPERIMENT_DETAILS['AUDIO_MODE_IS_CONCAT_NOT_SHORTEN']
@@ -480,40 +449,49 @@ def organise_data(config, logger, file, database, min_samples,
         features, loc = group_data(features, feat_shape, feature_dim, freq_bins,
                                    convert_to_im)
 
-    zeros, zero_index, ones, one_index, class_weights = data_info(labels,
-                                                                  mode_label,
-                                                                  logger,
-                                                                  config)
-
-    index = [zero_index, one_index]
+    index = [0, 0]
+    class_weights = [1, 1]
+    zeros = ones = 0
+    if mode_label == 'dev':
+        _, zero_index, _, one_index, class_weights = data_info(labels,
+                                                               mode_label,
+                                                               logger, config)
+        index = [zero_index, one_index]
 
     return features, labels, index, loc, (zeros, ones, class_weights)
 
 
-def log_train_data(logger, class_data, gender_weights=None, train_index=None):
-    logger.info(f"\nThe class weights (Non-Depresed vs Depressed) are: "
-                f"{class_data[-1]}")
-    if gender_weights is not None:
-        female_tot = len(train_index[0]) + len(train_index[1])
-        male_tot = len(train_index[2]) + len(train_index[3])
-        nd_tot = len(train_index[0]) + len(train_index[2])
-        d_tot = len(train_index[1]) + len(train_index[3])
-        comp = female_tot + male_tot
-        table = np.array([[len(train_index[0]), len(train_index[1]), female_tot],
-                          [len(train_index[2]), len(train_index[3]),
-                           male_tot], [nd_tot, d_tot, comp]])
-        p = pd.DataFrame(data=table, index=['Female', 'Male', 'Total'],
-                         columns=['Non-Dep', 'Dep', 'Total'])
-        logger.info(f"\n{p}\n")
-        logger.info(f"\nThe Gender Weights are: \nFemale_Non_Dep: "
-                    f"{gender_weights[0][0]}\nFemale_Dep: "
-                    f"{gender_weights[1][0]}\nMale_Non_Dep: "
-                    f"{gender_weights[2][0]}\nMale_Dep: "
-                    f"{gender_weights[3][0]}\n")
+def gender_split_indices(data):
+    if isinstance(data, list):
+        data = np.array(data)
+    male_dep_indices = list(np.where((data[1, :] == 1) & (data[-2, :] == 1))[0])
+    male_ndep_indices = list(np.where((data[1, :] == 0) & (data[-2, :] ==
+                                                           1))[0])
+    female_dep_indices = list(np.where((data[1, :] == 1) & (data[-2, :] ==
+                                                           0))[0])
+    female_ndep_indices = list(np.where((data[1, :] == 0) & (data[-2, :] ==
+                                                           0))[0])
+
+    male_dep = len(male_dep_indices)
+    male_ndep = len(male_ndep_indices)
+    fem_dep = len(female_dep_indices)
+    fem_ndep = len(female_ndep_indices)
+
+    min_value = min([male_dep, male_ndep, fem_dep, fem_ndep])
+
+    fem_nd_w = find_weight(fem_ndep, min_value)
+    fem_d_w = find_weight(fem_dep, min_value)
+    male_nd_w = find_weight(male_ndep, min_value)
+    male_d_w = find_weight(male_dep, min_value)
+    weights = (torch.Tensor(fem_nd_w), torch.Tensor(fem_d_w),
+               torch.Tensor(male_nd_w), torch.Tensor(male_d_w))
+
+    return female_ndep_indices, female_dep_indices, male_ndep_indices, \
+           male_dep_indices, weights
 
 
 def run(config, logger, current_fold, checkpoint, data_fold_dir,
-        data_fold_dir_equal, features_dir, data_saver):
+        data_fold_dir_equal, features_dir, data_saver, tester=False):
     """
     High level function to process the training and validation data. This
     function obtains the file locations, folds for training/validation sets,
@@ -533,13 +511,13 @@ def run(config, logger, current_fold, checkpoint, data_fold_dir,
         one_train
     """
     feature_exp = config.EXPERIMENT_DETAILS['FEATURE_EXP']
-    learning_procedure_train = config.LEARNING_PROCEDURE_TRAIN
-    learning_procedure_dev = config.LEARNING_PROCEDURE_DEV
-    train_file, dev_file, summary_file, database = file_paths(features_dir,
-                                                              config, logger,
-                                                              current_fold,
-                                                              data_fold_dir,
-                                                              data_fold_dir_equal)
+    learning_procedure = config.LEARNING_PROCEDURE_DEV
+
+    dev_file, test_file, summary_file, database = file_paths(features_dir,
+                                                             config, logger,
+                                                             current_fold,
+                                                             data_fold_dir,
+                                                             data_fold_dir_equal)
     with open(summary_file, 'rb') as f:
         summary = pickle.load(f)
     logger.info(f"The dimensions of the logmel features before segmentation "
@@ -549,58 +527,52 @@ def run(config, logger, current_fold, checkpoint, data_fold_dir,
     else:
         min_samples = int(summary[1][summary[0].index('MinWindows')])
 
-    # class data is tuple (number zeros, number ones, class weights)
-    train_features, train_labels, train_index, train_loc, class_data = \
-        organise_data(config, logger, train_file, database, min_samples,
-                      learning_procedure_train, mode_label='train')
+    if tester:
+        features, labels, index, loc, class_data = organise_data(config, logger,
+                                                                 test_file,
+                                                                 database,
+                                                                 min_samples,
+                                                                 learning_procedure,
+                                                                 mode_label='test')
+    else:
+        features, labels, index, loc, class_data = organise_data(config,
+                                                                 logger,
+                                                                 dev_file,
+                                                                 database,
+                                                                 min_samples,
+                                                                 learning_procedure,
+                                                                 mode_label='dev')
 
-    dev_features, dev_labels, dev_index, dev_loc, _ = organise_data(config,
-                                                                    logger,
-                                                                    dev_file,
-                                                                    database,
-                                                                    min_samples,
-                                                                    learning_procedure_dev,
-                                                                    mode_label='dev')
     gender_balance = config.EXPERIMENT_DETAILS['USE_GENDER_WEIGHTS']
-    if gender_balance:
+    class_weights = data_saver['class_weights']
+    if gender_balance and not tester:
         # Gender weights tuple of (fem_nd_w, fem_d_w, male_nd_w, male_d_w)
         female_ndep_ind, female_dep_ind, male_ndep_ind, male_dep_ind, \
-        gender_weights = gender_split_indices(train_labels)
-        train_index = [female_ndep_ind, female_dep_ind, male_ndep_ind,
-                       male_dep_ind]
-        log_train_data(logger, class_data, gender_weights, train_index)
-        zero, ones, class_weights = class_data
-        class_data = (zero, ones, gender_weights)
-
-        female_ndep_ind, female_dep_ind, male_ndep_ind, male_dep_ind, \
-        _ = gender_split_indices(dev_labels)
-        dev_index = [female_ndep_ind, female_dep_ind, male_ndep_ind,
-                     male_dep_ind]
-
-        for p, i in enumerate(dev_labels[3]):
-            if dev_labels[3][p] == 0 and i == 0:
+        gender_weights = gender_split_indices(labels)
+        index = [female_ndep_ind, female_dep_ind, male_ndep_ind,
+                 male_dep_ind]
+        for p, i in enumerate(labels[3]):
+            if labels[3][p] == 0 and i == 0:
                 pass
-            elif dev_labels[3][p] == 0 and i == 1:
-                dev_labels[3][p] = 2
-            elif dev_labels[3][p] == 1 and i == 0:
-                dev_labels[3][p] = 1
+            elif labels[3][p] == 0 and i == 1:
+                labels[3][p] = 2
+            elif labels[3][p] == 1 and i == 0:
+                labels[3][p] = 1
             else:
-                dev_labels[3][p] = 3
-    else:
-        log_train_data(logger, class_data)
+                labels[3][p] = 3
 
-    generator = data_gen.GenerateData(train_labels=train_labels,
-                                      dev_labels=dev_labels,
-                                      train_feat=train_features,
-                                      dev_feat=dev_features,
-                                      train_loc=train_loc,
-                                      dev_loc=dev_loc,
-                                      train_indices=train_index,
-                                      dev_indices=dev_index,
+    generator = data_gen.GenerateData(train_labels=None,
+                                      dev_labels=labels,
+                                      train_feat=None,
+                                      dev_feat=features,
+                                      train_loc=None,
+                                      dev_loc=loc,
+                                      train_indices=index,
+                                      dev_indices=index,
                                       logger=logger,
                                       config=config,
                                       checkpoint=checkpoint,
                                       gender_balance=gender_balance,
                                       data_saver=data_saver)
 
-    return generator, class_data
+    return generator, (0, 0, class_weights)

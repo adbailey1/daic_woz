@@ -4,6 +4,10 @@ Install miniconda and load the environment file from environment.yml file
 
 `conda env create -f environment.yml`
 
+For Windows use:
+
+`conda env create -f env_windows.yml`
+
 (Or should you prefer, use the text file)
 
 Activate the new environment: `conda activate myenv`
@@ -36,13 +40,18 @@ Optional commands are:
 - --debug - for debug mode which automatically overwrites an previous data at
   a directory for quicker debugging. 
 
-For example: To run a training experiment without bash, using a validation
- set, GPU, and not visualising the per epoch results graphs
+For example: To run a training experiment through the terminal, using a
+ validation set, GPU, and not visualising the per epoch results graphs
  
- `python3 main.py train --validate --cuda --server`
+ `python3 main.py train --validate --cuda --vis`
+ 
+ Otherwise edit the run.sh file and call ./run.sh from the terminal
 
 **Notes**
 
 So far the audio and textual data have been experimented with with the
  ability to process the visual data to be conducted in the future.  
+ 
+ This framework is still being tested, especially in terms of running a test
+  set with a pre-trained model. Any other issues found, please let me know. 
 

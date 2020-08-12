@@ -196,6 +196,18 @@ class ConvBlock(nn.Module):
             else:
                 x = self.act(self.conv1(x))
 
+        d = x.dim()
+        if d == 4:
+            batch, freq, height, width = x.shape
+            if height == 1:
+                x = x.reshape(batch, freq, width)
+            elif width == 1:
+                x = x.reshape(batch, freq, height)
+        elif d == 3:
+            batch, freq, width = x.shape
+            if width == 1:
+                x = x.reshape(batch, -1)
+
         return x
 
 
@@ -256,7 +268,11 @@ class FullyConnected(nn.Module):
         else:
             if self.att:
                 if self.act:
-                    x = self.act(self.fc(x))
+                    if x.dim() == 3:
+                        batch, time, freq = x.shape
+                        x = self.act(self.fc(x).reshape(batch, -1))
+                    else:
+                        x = self.act(self.fc(x))
                 else:
                     x = self.fc(x)
             # elif x.dim() == 3:
@@ -274,17 +290,17 @@ def lstm_with_attention(net_params):
         arguments = net_params['LSTM_1']
     else:
         arguments = net_params['GRU_1']
-    if 'ATTENTION_1' in net_params and 'ATTENTION_Global' not in net_params:
+    if 'ATTENTION_1' in net_params and 'ATTENTION_global' not in net_params:
         if arguments[-1]:
             return 'forward'
         else:
             return 'whole'
-    if 'ATTENTION_1' in net_params and 'ATTENTION_Global' in net_params:
+    if 'ATTENTION_1' in net_params and 'ATTENTION_global' in net_params:
         if arguments[-1]:
             return 'forward'
         else:
             return 'whole'
-    if 'ATTENTION_1' not in net_params and 'ATTENTION_Global' in net_params:
+    if 'ATTENTION_1' not in net_params and 'ATTENTION_global' in net_params:
         if arguments[-1]:
             return 'forward_only'
         else:
@@ -505,7 +521,7 @@ class CustomAtt(nn.Module):
                     else:
                         x, h = layer(x, hidden)
 
-                if 'ATTENTION_1' in net_params or 'ATTENTION_Global' in \
+                if 'ATTENTION_1' in net_params or 'ATTENTION_global' in \
                         net_params:
                     recurrent_out = lstm_with_attention(net_params)
                 arguments = net_params[name]
@@ -548,8 +564,6 @@ class CustomAtt(nn.Module):
 
         if 'ATTENTION_1' in net_params:
             x = x.reshape(batch, -1)
-            soft = nn.Softmax(dim=-1)
-            z = soft(z)
             x = x * z
             x = torch.sum(x, dim=1).reshape(batch, -1)
 

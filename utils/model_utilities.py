@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 
 
 def create_tensor_data(x, cuda, select_net, labels=False):
@@ -29,8 +30,8 @@ def create_tensor_data(x, cuda, select_net, labels=False):
     return x
 
 
-def calculate_loss(prediction, target, averaging_setting, cw=None,
-                   net_params='SOFTMAX_1'):
+def calculate_loss(prediction, target, cw=None, net_params='SOFTMAX_1',
+                   gender=True):
     """
     With respect to the final layer of the model, calculate the loss of the
     model.
@@ -61,17 +62,40 @@ def calculate_loss(prediction, target, averaging_setting, cw=None,
                                             target,
                                             weight=cw)
     elif loss_func == 'SIG':
-        if target.shape != cw.shape:
-            length = target.shape[0]
-            cw = cw[0:length]
+        # batch_zeros_f, batch_ones_f, batch_zeros_m, batch_ones_m
+        # cw = f_ndep_ind, f_dep_ind, m_ndep_ind, m_dep_ind
+        # OR
+        # cw = nd, d
+        if gender:
+            fem_nd_w, fem_d_w, male_nd_w, male_d_w = cw
+            zero_ind = (target == 0).nonzero().reshape(-1)
+            one_ind = (target == 1).nonzero().reshape(-1)
+            two_ind = (target == 2).nonzero().reshape(-1)
+            three_ind = (target == 3).nonzero().reshape(-1)
+            class_weights = torch.ones(target.shape[0])
+            class_weights.scatter_(0, zero_ind, fem_nd_w[0])
+            class_weights.scatter_(0, one_ind, fem_d_w[0])
+            class_weights.scatter_(0, two_ind, male_nd_w[0])
+            class_weights.scatter_(0, three_ind, male_d_w[0])
+            cw = class_weights.reshape(-1, 1)
+            target = target % 2
+        else:
+            if target.shape[0] != cw.shape[0]:
+                zero_ind = (target == 0).nonzero().reshape(-1)
+                one_ind = (target == 1).nonzero().reshape(-1)
+                class_weights = torch.ones(target.shape[0])
+                class_weights.scatter_(0, zero_ind, cw[0])
+                class_weights.scatter_(0, one_ind, cw[1])
+
+                cw = class_weights.reshape(-1, 1)
+        if type(cw) is not torch.Tensor:
+            cw = torch.Tensor(cw)
         if net_params['SIGMOID_1'] == 'unnorm':
             target = 1 - target
         if prediction.dim() == 1:
             prediction = prediction.view(-1, 1)
-        loss = bce_loss_func(target=target.float().view(-1, 1),
-                             prediction=prediction,
-                             avg_setting=averaging_setting,
-                             weight=cw)
+        bceloss = nn.BCELoss(weight=cw)
+        loss = bceloss(prediction, target.float().view(-1, 1))
 
     return loss
 
